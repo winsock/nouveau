@@ -15,6 +15,15 @@ struct nvkm_vm_pgd {
 	struct nvkm_gpuobj *obj;
 };
 
+/**
+ * struct nvkm_vma - range in a virtual address space
+ *
+ * @head
+ * @refcount number of references to this VMA
+ * @vm VM this range originates from
+ * @node range within the VM's nouveau_mm
+ * @offset starting address (in bytes) of this VMA
+ */
 struct nvkm_vma {
 	struct list_head head;
 	int refcount;
@@ -24,6 +33,12 @@ struct nvkm_vma {
 	u32 access;
 };
 
+/**
+ * struct nvkm_vm - virtual address space
+ *
+ * @vmm: mapping properties and operations
+ * @mm: space from which ranges can be allocated
+ */
 struct nvkm_vm {
 	struct nvkm_mmu *mmu;
 	struct nvkm_mm mm;
@@ -37,6 +52,9 @@ struct nvkm_vm {
 	u32 lpde;
 };
 
+/**
+ * struct nvkm_mmu - mapping properties and operations
+ */
 struct nvkm_mmu {
 	struct nvkm_subdev base;
 

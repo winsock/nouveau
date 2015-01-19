@@ -21,6 +21,36 @@
 #define NV_MEM_TYPE_VM 0x7f
 #define NV_MEM_COMP_VM 0x03
 
+/**
+ * struct nvkm_mem - allocated memory
+ *
+ * Physical memory can be provided through 3 different ways:
+ * 1) as an array of pages, using the pages member
+ * 2) as a SG table, using the sg member
+ * 3) as a list of nouveau_mm_node, using the regions member
+ *
+ * One and only one of these backing mechanisms can be used at a given time.
+ * nouveau_vm_map() will use the correct mapping function according to which
+ * one is used.
+ *
+ * @dev: DRM device this memory is allocated for
+ * @bar_vma: if this object is mapped into the BAR, this records its mapping
+ * @vma: where this object is mapped in the GPU virtual address space. The
+ *       second index is used when copying/moving objects
+ * @page_shift: size of allocated memory pages
+ * @memtype: type of memory
+ * @offset: start address of the physical memory backing this object. This
+ *          may not be completely meaningful if the memory is not contiguous
+ * @size: size of the memory object in pages
+ *
+ * Only one of the following members can be used at the same time:
+ *
+ * @regions: list of nouveau_mm_node describing the physical regions of VRAM
+ *           allocated to this memory object
+ * @pages: array of "size" addresses to the beginning of physical memory
+ *         pages backing this memory object
+ * @sg: SG table backing this memory object
+ */
 struct nvkm_mem {
 	struct drm_device *dev;
 
