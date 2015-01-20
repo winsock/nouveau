@@ -85,6 +85,9 @@ nouveau_vram_manager_new(struct ttm_mem_type_manager *man,
 	if (nvbo->tile_flags & NOUVEAU_GEM_TILE_NONCONTIG)
 		size_nc = 1 << nvbo->page_shift;
 
+	if (!pfb->ram)
+		return -ENOMEM;
+
 	ret = pfb->ram->get(pfb, mem->num_pages << PAGE_SHIFT,
 			   mem->page_alignment << PAGE_SHIFT, size_nc,
 			   (nvbo->tile_flags >> 8) & 0x3ff, &node);
