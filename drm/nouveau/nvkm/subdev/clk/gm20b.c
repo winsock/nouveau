@@ -1015,7 +1015,7 @@ gm20b_napll_setup(struct gm20b_clk_priv *priv)
 				GPCPLL_DVFS1_DFS_CAL_DONE_BIT,
 				GPCPLL_DVFS1_DFS_CAL_DONE_BIT)) {
 		nv_error(priv, "%s: DVFS calibration timeout\n", __func__);
-		return -ETIMEDOUT;
+		//return -ETIMEDOUT;
 	}
 
 	val = nv_rd32(priv, GPCPLL_CFG3);
