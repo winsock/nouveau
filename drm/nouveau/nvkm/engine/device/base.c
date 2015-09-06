@@ -26,6 +26,7 @@
 
 #include <core/notify.h>
 #include <core/option.h>
+#include <core/secure_boot.h>
 
 #include <subdev/bios.h>
 
@@ -2036,12 +2037,17 @@ nv12b_chipset = {
 	.ltc = gm107_ltc_new,
 	.mc = gk20a_mc_new,
 	.mmu = gf100_mmu_new,
+	.pmu = gm20b_pmu_new,
 	.timer = gk20a_timer_new,
 	.ce[2] = gm204_ce_new,
 	.dma = gf119_dma_new,
 	.fifo = gm20b_fifo_new,
 	.gr = gm20b_gr_new,
 	.sw = gf100_sw_new,
+	.secure_boot = {
+		.managed_falcons = BIT(LSF_FALCON_ID_FECS) | BIT(LSF_FALCON_ID_PMU),
+		.boot_falcon = LSF_FALCON_ID_PMU,
+	},
 };
 
 static int
@@ -2273,6 +2279,10 @@ nvkm_device_del(struct nvkm_device **pdevice)
 	if (device) {
 		mutex_lock(&nv_devices_mutex);
 		device->disable_mask = 0;
+
+		if (nvkm_need_secure_boot(device))
+			nvkm_secure_boot_fini(device);
+
 		for (i = NVKM_SUBDEV_NR - 1; i >= 0; i--) {
 			struct nvkm_subdev *subdev =
 				nvkm_device_subdev(device, i);
@@ -2567,6 +2577,10 @@ nvkm_device_ctor(const struct nvkm_device_func *func,
 	}
 
 	ret = 0;
+
+	if (nvkm_need_secure_boot(device))
+		ret = nvkm_secure_boot_init(device);
+
 done:
 	mutex_unlock(&nv_devices_mutex);
 	return ret;
