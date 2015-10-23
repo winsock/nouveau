@@ -225,19 +225,6 @@ struct flcn_bl_dmem_desc {
 	u32 data_size;
 };
 
-struct loader_config {
-	u32 dma_idx;
-	u32 code_dma_base;     /* upper 32-bits of 40-bit dma address */
-	u32 code_size_total;
-	u32 code_size_to_load;
-	u32 code_entry_point;
-	u32 data_dma_base;    /* upper 32-bits of 40-bit dma address */
-	u32 data_size;        /* initialized data of the application */
-	u32 overlay_dma_base; /* upper 32-bits of the 40-bit dma address */
-	u32 argc;
-	u32 argv;
-};
-
 /**
  * struct ls_ucode_desc - descriptor of firmware image
  * @descriptor_size:		size of this descriptor
@@ -311,10 +298,7 @@ struct lsf_ucode_img {
 	/* All members below to be copied into the WPR blob */
 	struct lsf_wpr_header wpr_header;
 	struct lsf_lsb_header lsb_header;
-	union {
-		struct flcn_bl_dmem_desc bl_dmem_desc;
-		struct loader_config loader_cfg;
-	} bl_gen_desc;
+	struct flcn_bl_dmem_desc bl_dmem_desc;
 	u32 *ucode_header;
 	u8 *ucode_data;
 	u32 ucode_size;
@@ -455,10 +439,6 @@ struct secure_boot {
 	/* HS bootloader */
 	void *hsbl_blob;
 
-	/* Trace buffer */
-	struct nvkm_gpuobj *trace_buf;
-	struct nvkm_vma trace_buf_vma;
-
 	/* Instance block & address space */
 	struct nvkm_gpuobj *inst;
 	struct nvkm_gpuobj *pgd;
@@ -524,50 +504,6 @@ secure_boot_load_fw(struct nvkm_device *device, const char *name,
 		return ERR_PTR(-ENOMEM);
 
 	return ret;
-}
-
-static int
-load_pmu_ucode(struct nvkm_device *device, struct lsf_ucode_img *img)
-{
-	int err;
-	struct lsf_ucode_desc *lsf_desc;
-	struct ls_ucode_desc *desc;
-
-	img->ucode_header = NULL;
-
-	img->ucode_data = secure_boot_load_fw(device, "gpmu_ucode_image", 0);
-	if (IS_ERR(img->ucode_data)) {
-		err = PTR_ERR(img->ucode_data);
-		goto error;
-	}
-	desc = secure_boot_load_fw(device, "gpmu_ucode_desc", sizeof(*desc));
-	if (IS_ERR(desc)) {
-		err = PTR_ERR(desc);
-		goto free_data;
-	}
-	memcpy(&img->ucode_desc, desc, sizeof(img->ucode_desc));
-	kfree(desc);
-
-	lsf_desc = secure_boot_load_fw(device, "pmu_sig", sizeof(*lsf_desc));
-	if (IS_ERR(lsf_desc)) {
-		err = PTR_ERR(lsf_desc);
-		goto free_data;
-	}
-	/* not needed? the signature should already have the right value */
-	lsf_desc->falcon_id = LSF_FALCON_ID_PMU;
-	memcpy(&img->lsb_header.signature, lsf_desc, sizeof(*lsf_desc));
-	img->falcon_id = lsf_desc->falcon_id;
-	kfree(lsf_desc);
-
-	img->ucode_size = img->ucode_desc.image_size;
-
-	return 0;
-
-free_data:
-	kfree(img->ucode_data);
-error:
-	return err;
-
 }
 
 #define BL_DESC_BLK_SIZE 256
@@ -775,18 +711,8 @@ lsf_ucode_img_fill_headers(struct lsf_ucode_img *img, u32 offset,
 		if (img->falcon_id == falcon_id)
 			lhdr->flags = NV_FLCN_ACR_LSF_FLAG_DMACTL_REQ_CTX_TRUE;
 
-		/*
-		 * Track the size for LSB details filled in later.
-		 * Note that at this point we don't know what kind of
-		 * boot loader desc, so we just take the size of the
-		 * generic one, which is the largest it will will ever
-		 * be.
-		 */
-		/*
-		 * Align (size bloat) and save off generic descriptor
-		 * size
-		 */
-		lhdr->bl_data_size = ALIGN(sizeof(img->bl_gen_desc),
+		/* Align (size bloat) and save off BL descriptor size */
+		lhdr->bl_data_size = ALIGN(sizeof(img->bl_dmem_desc),
 					   LSF_BL_DATA_SIZE_ALIGN);
 		/*
 		 * Align, save off, and include the additional BL data
@@ -870,76 +796,6 @@ falcon_populate_bl_dmem_desc(struct secure_boot *sb, struct lsf_ucode_img *img,
 	desc->code_entry_point = pdesc->app_imem_entry;
 }
 
-struct pmu_mem_v1 {
-	u32 dma_base;
-	u8  dma_offset;
-	u8  dma_idx;
-	u16 fb_size;
-};
-
-struct pmu_cmdline_args_v1 {
-	u32 reserved;
-	u32 cpu_freq_hz;		/* Frequency of the clock driving PMU */
-	u32 falc_trace_size;		/* falctrace buffer size (bytes) */
-	u32 falc_trace_dma_base;	/* 256-byte block address */
-	u32 falc_trace_dma_idx;		/* dmaIdx for DMA operations */
-	u8 secure_mode;
-	u8 raise_priv_sec;
-	struct pmu_mem_v1 gc6_ctx;		/* dmem offset of gc6 context */
-};
-/*
- * Calculates PHY and VIRT addresses for various portions of the PMU ucode.
- * e.g. application code, application data, and bootloader code.
- * Return -EINVAL if ucode image is header based.
- * HS bin will use BL desc to boot PMU LS(Low secure) falcon.
- */
-static void
-pmu_populate_loader_cfg(struct nvkm_device *device,
-			struct secure_boot *sb,
-			struct lsf_ucode_img *node,
-			struct loader_config *desc)
-{
-	struct ls_ucode_desc *pdesc = &node->ucode_desc;
-	u64 addr_base;
-	u32 addr_args;
-
-	addr_base = sb->wpr_addr + node->lsb_header.ucode_off +
-		pdesc->app_start_offset;
-
-	addr_args = ((nvkm_rd32(device, 0x10a108) >> 9) & 0x1ff) << 8;
-	addr_args -= sizeof(struct pmu_cmdline_args_v1);
-
-	desc->dma_idx = GK20A_PMU_DMAIDX_UCODE;
-	desc->code_dma_base = lower_32_bits((addr_base +
-					pdesc->app_resident_code_offset) >> 8);
-	desc->code_size_total = pdesc->app_size;
-	desc->code_size_to_load = pdesc->app_resident_code_size;
-	desc->code_entry_point = pdesc->app_imem_entry;
-	desc->data_dma_base = lower_32_bits((addr_base +
-					pdesc->app_resident_data_offset) >> 8);
-	desc->data_size = pdesc->app_resident_data_size;
-	desc->overlay_dma_base = desc->code_dma_base;
-
-	desc->argc = 1;
-	desc->argv = addr_args;
-}
-
-static void
-lsf_fill_falcon_bl_gen_desc(struct nvkm_device *device,
-			    struct secure_boot *sb,
-			    struct lsf_ucode_img *node, u32 *size)
-{
-	if (node->falcon_id == sb->falcon_id) {
-		pmu_populate_loader_cfg(device, sb, node,
-					&node->bl_gen_desc.loader_cfg);
-		*size = sizeof(node->bl_gen_desc.loader_cfg);
-	} else {
-		falcon_populate_bl_dmem_desc(sb, node,
-					     &node->bl_gen_desc.bl_dmem_desc);
-		*size = sizeof(node->bl_gen_desc.bl_dmem_desc);
-	}
-}
-
 typedef int (*lsf_load_func)(struct nvkm_device *, struct lsf_ucode_img *);
 
 static struct lsf_ucode_img *
@@ -1002,11 +858,12 @@ lsf_mgr_write_wpr(struct nvkm_device *device, struct secure_boot *sb,
 				   &img->lsb_header, sizeof(img->lsb_header));
 
 		if (!img->ucode_header) {
-			u32 size = 0;
-			lsf_fill_falcon_bl_gen_desc(device, sb, img, &size);
+			falcon_populate_bl_dmem_desc(sb, img,
+						     &img->bl_dmem_desc);
 			nvkm_gpuobj_memcpy(ucodebuf,
 					   img->lsb_header.bl_data_off,
-					   &img->bl_gen_desc, size);
+					   &img->bl_dmem_desc,
+					   sizeof(img->bl_dmem_desc));
 		}
 
 		/* Copy ucode */
@@ -1023,7 +880,6 @@ lsf_mgr_write_wpr(struct nvkm_device *device, struct secure_boot *sb,
 
 static const lsf_load_func lsf_load_funcs[] = {
 	[LSF_FALCON_ID_END] = NULL, /* reserve enough space */
-	[LSF_FALCON_ID_PMU] = load_pmu_ucode,
 	[LSF_FALCON_ID_FECS] = load_fecs_ucode,
 };
 
@@ -1210,13 +1066,6 @@ pmu_reset(struct nvkm_device *device)
 	return pmu_enable(device);
 }
 
-static void
-pmu_start(struct nvkm_device *device)
-{
-	pmu_enable_irq(device);
-	nvkm_wr32(device, 0x10a130, 0x2);
-}
-
 #define PMU_DMEM_ADDR_MASK	0xfffc
 static int
 pmu_copy_to_dmem(struct nvkm_device *device, u32 dst, void *src, u32 size,
@@ -1263,27 +1112,12 @@ pmu_load_hs_bl(struct nvkm_device *device)
 	struct secure_boot *sb = device->secure_boot_state;
 	struct hs_bin_hdr *hdr = sb->hsbl_blob;
 	struct hsflcn_bl_desc *hsbl_desc = sb->hsbl_blob + hdr->header_offset;
-	struct pmu_cmdline_args_v1 args;
-	u32 addr_args;
 	u32 acr_blob_vma_base = lower_32_bits(sb->acr_blob_vma.offset >> 8);
 	void *hsbl_code = sb->hsbl_blob + hdr->data_offset;
 	u32 code_size = ALIGN(hsbl_desc->bl_code_size, 256);
 	u32 dst_blk;
 	u32 tag;
 	int i;
-
-	/* Write HS bootloader args to top of DMEM */
-	memset(&args, 0, sizeof(args));
-	args.secure_mode = 1;
-	if (sb->trace_buf) {
-		args.falc_trace_size = sb->trace_buf->size;
-		args.falc_trace_dma_base = lower_32_bits(
-			sb->trace_buf_vma.offset / 0x100);
-		args.falc_trace_dma_idx = GK20A_PMU_DMAIDX_VIRT;
-	}
-	addr_args = (((nvkm_rd32(device, 0x10a108) >> 9) & 0x1ff) << 8) -
-		    sizeof(args);
-	pmu_copy_to_dmem(device, addr_args, &args, sizeof(args), 0);
 
 	/*
 	 * Copy HS bootloader interface structure where the HS descriptor
@@ -1334,39 +1168,6 @@ pmu_bl_bootstrap(struct nvkm_device *device)
 	nvkm_wr32(device, 0x10a100, 0x2);
 
 	return 0;
-}
-
-static int
-pmu_setup_trace_buffer(struct nvkm_device *device)
-{
-	struct secure_boot *sb = device->secure_boot_state;
-	int err;
-
-	err = nvkm_gpuobj_new(device, 0x4000, 0x1000, false, NULL,
-			      &sb->trace_buf);
-	if (err)
-		return err;
-
-	err = nvkm_gpuobj_map(sb->trace_buf, sb->vm, NV_MEM_ACCESS_RW,
-			      &sb->trace_buf_vma);
-	if (err)
-		goto del_gpuobj;
-
-	return 0;
-
-del_gpuobj:
-	nvkm_gpuobj_del(&sb->trace_buf);
-
-	return err;
-}
-
-static void
-pmu_cleanup_trace_buffer(struct nvkm_device *device)
-{
-	struct secure_boot *sb = device->secure_boot_state;
-
-	nvkm_gpuobj_unmap(&sb->trace_buf_vma);
-	nvkm_gpuobj_del(&sb->trace_buf);
 }
 
 static int
@@ -1763,9 +1564,6 @@ nvkm_secure_boot_fini(struct nvkm_device *device)
 	if (!sb)
 		return;
 
-	if (sb->trace_buf)
-		pmu_cleanup_trace_buffer(device);
-
 	if (sb->hsbl_blob)
 		del_hs_bootloader(device);
 
@@ -1820,14 +1618,6 @@ nvkm_secure_boot(struct nvkm_device *device)
 			return err;
 	}
 
-	/* (optional) trace buffer */
-	if (!sb->trace_buf) {
-		err = pmu_setup_trace_buffer(device);
-		/* we can live without a trace buffer */
-		if (err)
-			nvdev_warn(device, "cannot create trace buffer\n");
-	}
-
 	/* Map the HS firmware so the HS bootloader can see it */
 	err = nvkm_gpuobj_map(sb->acr_blob, sb->vm, NV_MEM_ACCESS_RW,
 			      &sb->acr_blob_vma);
@@ -1843,9 +1633,6 @@ nvkm_secure_boot(struct nvkm_device *device)
 
 	/* We don't need the ACR firmware anymore */
 	nvkm_gpuobj_unmap(&sb->acr_blob_vma);
-
-	/* TODO If the performing falcon is also managed, start its LS firmware */
-	pmu_start(device);
 
 	return err;
 }
