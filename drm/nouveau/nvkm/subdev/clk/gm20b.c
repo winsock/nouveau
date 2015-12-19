@@ -1235,7 +1235,6 @@ gm20b_clk_init_fused_params(struct gm20b_clk *priv)
 	struct gm20b_pllg_fused_params *p = &priv->fused_params;
 	u32 val;
 
-#ifdef CONFIG_TEGRA
 	tegra_fuse_readl(FUSE_RESERVED_CALIB0, &val);
 	if ((val >> FUSE_RESERVED_CALIB0_FUSE_REV_SHIFT) &
 			MASK(FUSE_RESERVED_CALIB0_FUSE_REV_WIDTH)) {
